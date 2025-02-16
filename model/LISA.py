@@ -8,10 +8,14 @@ from transformers import BitsAndBytesConfig, CLIPVisionModel
 from utils.utils import (DEFAULT_IM_END_TOKEN, DEFAULT_IM_START_TOKEN,
                          DEFAULT_IMAGE_PATCH_TOKEN)
 
-from .llava.model.language_model.llava_llama import (LlavaLlamaForCausalLM,
+# from .llava.model.language_model.llava_llama import (LlavaLlamaForCausalLM,
+#                                                      LlavaLlamaModel)
+from .llava1p5.model.language_model.llava_llama import (LlavaLlamaForCausalLM,
                                                      LlavaLlamaModel)
 from .segment_anything import build_sam_vit_h
 
+from scipy.optimize import linear_sum_assignment
+import numpy as np
 
 def dice_loss(
     inputs: torch.Tensor,
@@ -135,7 +139,11 @@ class LISAForCausalLM(LlavaLlamaForCausalLM):
             self.dice_loss_weight = kwargs.pop("dice_loss_weight", None)
             self.bce_loss_weight = kwargs.pop("bce_loss_weight", None)
         else:
-            config.mm_vision_tower = config.vision_tower
+            config.mm_use_im_start_end = kwargs.pop("use_mm_start_end", True)
+            config.mm_vision_tower = kwargs.get("vision_tower", config.vision_tower)
+            self.ce_loss_weight = kwargs.pop("ce_loss_weight", None)
+            self.dice_loss_weight = kwargs.pop("dice_loss_weight", None)
+            self.bce_loss_weight = kwargs.pop("bce_loss_weight", None)
             
         self.seg_token_idx = kwargs.pop("seg_token_idx")
 
@@ -166,7 +174,103 @@ class LISAForCausalLM(LlavaLlamaForCausalLM):
             return super().forward(**kwargs)
         return self.model_forward(**kwargs)
 
-    def model_forward(
+    def batch_dice_loss(self, inputs, targets):
+        inputs = inputs.sigmoid()
+        inputs = inputs.flatten(1)
+        targets = targets.flatten(1)
+        numerator = 2 * torch.einsum("nc,mc->nm", inputs, targets)
+        denominator = inputs.sum(-1)[:, None] + targets.sum(-1)[None, :]
+        loss = 1 - (numerator + 1) / (denominator + 1)
+        return loss
+    
+
+    def batch_sigmoid_ce_loss(self, inputs: torch.Tensor, targets: torch.Tensor):
+        """
+        Args:
+            inputs: A float tensor of arbitrary shape.
+                    The predictions for each example.
+            targets: A float tensor with the same shape as inputs. Stores the binary
+                    classification label for each element in inputs
+                    (0 for the negative class and 1 for the positive class).
+        Returns:
+            Loss tensor
+        """
+        hw = inputs.shape[1]
+
+        pos = F.binary_cross_entropy_with_logits(
+            inputs, torch.ones_like(inputs), reduction="none"
+        )
+        neg = F.binary_cross_entropy_with_logits(
+            inputs, torch.zeros_like(inputs), reduction="none"
+        )
+
+        loss = torch.einsum("nc,mc->nm", pos, targets) + torch.einsum(
+            "nc,mc->nm", neg, (1 - targets)
+        )
+
+        return loss / hw
+
+
+
+    def adjust_indices_order(self, pred_indices, gt_indices):
+        
+        adjusted_gt_indices = np.empty_like(gt_indices)
+
+        sorted_pred_indices = np.argsort(pred_indices)
+
+        for i, sorted_idx in enumerate(sorted_pred_indices):
+            adjusted_gt_indices[i] = gt_indices[sorted_idx]
+
+        return np.arange(len(pred_indices)), adjusted_gt_indices
+
+
+    def hungarian_matcher(self, pred_masks, gt_masks):
+        # Flatten the masks to two dimensions [N, H*W]
+        pred_masks = torch.stack([m.squeeze(0) for m in pred_masks]).flatten(1)
+        gt_masks = torch.stack([m.squeeze(0) for m in gt_masks]).flatten(1)
+
+        # Calculate Dice Loss for each pair of predicted and ground truth masks
+        dice_loss_cur = self.batch_dice_loss(pred_masks, gt_masks)
+        sigmoid_ce_loss_cur = self.batch_sigmoid_ce_loss(pred_masks, gt_masks)
+        
+        cost_matrix =  dice_loss_cur + sigmoid_ce_loss_cur
+
+        # Perform Hungarian Matching
+        pred_indices, gt_indices = linear_sum_assignment(cost_matrix.detach().cpu())
+        adjust_pred_indices, adjust_gt_indices = self.adjust_indices_order(pred_indices, gt_indices)
+
+        return adjust_pred_indices, adjust_gt_indices
+
+
+    def hungarian_matcher_batch(self, pred_masks, gt_masks, change_list):
+        reordered_gt_masks = []
+
+        for batch_idx, groups in enumerate(change_list):
+            batch_pred_masks = pred_masks[batch_idx]
+            batch_gt_masks = gt_masks[batch_idx]
+
+            reordered_batch_gt_masks = batch_gt_masks.clone()
+
+            for group in groups:
+                group_pred_masks = batch_pred_masks[group, :, :]
+                group_gt_masks = batch_gt_masks[group, :, :]
+
+                group_pred_masks = group_pred_masks.unsqueeze(1).flatten(1)
+                group_gt_masks = group_gt_masks.unsqueeze(1).flatten(1)
+
+                _, group_gt_indices = self.hungarian_matcher(group_pred_masks, group_gt_masks)
+
+                for idx, gt_idx in enumerate(group_gt_indices):
+                    reordered_batch_gt_masks[group[idx]] = batch_gt_masks[group[gt_idx]]
+
+            reordered_gt_masks.append(reordered_batch_gt_masks)
+
+        return reordered_gt_masks
+
+
+
+
+    def model_forward( #Can you segment the watch case and watch respectively in this image?
         self,
         images: torch.FloatTensor,
         images_clip: torch.FloatTensor,
@@ -178,6 +282,7 @@ class LISAForCausalLM(LlavaLlamaForCausalLM):
         label_list: List[torch.Tensor],
         resize_list: List[tuple],
         inference: bool = False,
+        change_list: List[torch.Tensor] = [],
         **kwargs,
     ):
         image_embeddings = self.get_visual_embs(images)
@@ -192,9 +297,10 @@ class LISAForCausalLM(LlavaLlamaForCausalLM):
             ],
             dim=1,
         )
+        image_token_len = (images_clip.shape[2] // 14) * (images_clip.shape[3] // 14)
         # hack for IMAGE_TOKEN_INDEX (we suppose that there is only one image, and it is in the front)
         seg_token_mask = torch.cat(
-            [torch.zeros((seg_token_mask.shape[0], 255)).bool().cuda(), seg_token_mask],
+            [torch.zeros((seg_token_mask.shape[0], image_token_len-1)).bool().cuda(), seg_token_mask],
             dim=1,
         )
 
@@ -296,6 +402,14 @@ class LISAForCausalLM(LlavaLlamaForCausalLM):
         model_output = output
         gt_masks = masks_list
 
+        for list_id in range(len(change_list)):
+            if isinstance(change_list[list_id], list):
+                gt_masks_cur = self.hungarian_matcher_batch([pred_masks[list_id]], [gt_masks[list_id]], [change_list[list_id]])
+                gt_masks[list_id] = gt_masks_cur[0]
+
+            else:
+                gt_masks[list_id] = gt_masks[list_id] 
+        
         if inference:
             return {
                 "pred_masks": pred_masks,
@@ -331,7 +445,6 @@ class LISAForCausalLM(LlavaLlamaForCausalLM):
         mask_bce_loss = self.bce_loss_weight * mask_bce_loss / (num_masks + 1e-8)
         mask_dice_loss = self.dice_loss_weight * mask_dice_loss / (num_masks + 1e-8)
         mask_loss = mask_bce_loss + mask_dice_loss
-
         loss = ce_loss + mask_loss
 
         return {
@@ -366,9 +479,10 @@ class LISAForCausalLM(LlavaLlamaForCausalLM):
 
             seg_token_mask = output_ids[:, 1:] == self.seg_token_idx
             # hack for IMAGE_TOKEN_INDEX (we suppose that there is only one image, and it is in the front)
+            image_token_len = (images_clip.shape[2] // 14) * (images_clip.shape[3] // 14)
             seg_token_mask = torch.cat(
                 [
-                    torch.zeros((seg_token_mask.shape[0], 255)).bool().cuda(),
+                    torch.zeros((seg_token_mask.shape[0], image_token_len-1)).bool().cuda(),
                     seg_token_mask,
                 ],
                 dim=1,
