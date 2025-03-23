@@ -78,13 +78,15 @@ class LisaMetaModel:
 
     def initialize_lisa_modules(self, config):
         # SAM
-        self.visual_model = build_sam_vit_h(self.vision_pretrained)
-        for param in self.visual_model.parameters():
-            param.requires_grad = False
-        if config.train_mask_decoder:
-            self.visual_model.mask_decoder.train()
-            for param in self.visual_model.mask_decoder.parameters():
-                param.requires_grad = True
+        # self.visual_model = build_sam_vit_h(self.vision_pretrained)
+        # for param in self.visual_model.parameters():
+        #     param.requires_grad = False
+        # if config.train_mask_decoder:
+        #     self.visual_model.mask_decoder.train()
+        #     for param in self.visual_model.mask_decoder.parameters():
+        #         param.requires_grad = True
+        # Diffusion
+        
 
         # Projection layer
         in_dim = config.hidden_size

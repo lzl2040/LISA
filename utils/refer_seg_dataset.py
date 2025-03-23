@@ -48,7 +48,7 @@ class ReferSegDataset(torch.utils.data.Dataset):
         self.short_question_list = SHORT_QUESTION_LIST
         self.answer_list = ANSWER_LIST
 
-        DATA_DIR = os.path.join(base_image_dir, "refer_seg")
+        DATA_DIR = os.path.join(base_image_dir, "coco")
         self.refer_seg_ds_list = refer_seg_data.split(
             "||"
         )  # ['refclef', 'refcoco', 'refcoco+', 'refcocog']
@@ -79,7 +79,7 @@ class ReferSegDataset(torch.utils.data.Dataset):
                     )
                 else:
                     item["file_name"] = os.path.join(
-                        DATA_DIR, "images/mscoco/images/train2014", item["file_name"]
+                        DATA_DIR, "train2014", item["file_name"]
                     )
                 refer_seg_ds["images"].append(item)
             refer_seg_ds["annotations"] = refer_api.Anns  # anns_train

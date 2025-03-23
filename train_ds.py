@@ -54,7 +54,7 @@ def parse_args(args):
         type=str,
     )
     parser.add_argument(
-        "--refer_seg_data", default="refclef||refcoco||refcoco+||refcocog", type=str
+        "--refer_seg_data", default="refcoco||refcoco+||refcocog", type=str
     )
     parser.add_argument("--vqa_data", default="llava_instruct_150k", type=str)
     parser.add_argument("--reason_seg_data", default="ReasonSeg|train", type=str)
@@ -365,39 +365,40 @@ def main(args):
         exit()
 
     for epoch in range(args.start_epoch, args.epochs):
+        print("epoch")
         # train for one epoch
-        train_iter = train(
-            train_loader,
-            model_engine,
-            epoch,
-            scheduler,
-            writer,
-            train_iter,
-            args,
-        )
+        # train_iter = train(
+        #     train_loader,
+        #     model_engine,
+        #     epoch,
+        #     scheduler,
+        #     writer,
+        #     train_iter,
+        #     args,
+        # )
 
-        if args.no_eval == False:
-            giou, ciou = validate(val_loader, model_engine, epoch, writer, args)
-            is_best = giou > best_score
-            best_score = max(giou, best_score)
-            cur_ciou = ciou if is_best else cur_ciou
+        # if args.no_eval == False:
+        #     giou, ciou = validate(val_loader, model_engine, epoch, writer, args)
+        #     is_best = giou > best_score
+        #     best_score = max(giou, best_score)
+        #     cur_ciou = ciou if is_best else cur_ciou
 
-        if args.no_eval or is_best:
-            save_dir = os.path.join(args.log_dir, "ckpt_model")
-            if args.local_rank == 0:
-                torch.save(
-                    {"epoch": epoch},
-                    os.path.join(
-                        args.log_dir,
-                        "meta_log_giou{:.3f}_ciou{:.3f}.pth".format(
-                            best_score, cur_ciou
-                        ),
-                    ),
-                )
-                if os.path.exists(save_dir):
-                    shutil.rmtree(save_dir)
-            torch.distributed.barrier()
-            model_engine.save_checkpoint(save_dir)
+        # if args.no_eval or is_best:
+        #     save_dir = os.path.join(args.log_dir, "ckpt_model")
+        #     if args.local_rank == 0:
+        #         torch.save(
+        #             {"epoch": epoch},
+        #             os.path.join(
+        #                 args.log_dir,
+        #                 "meta_log_giou{:.3f}_ciou{:.3f}.pth".format(
+        #                     best_score, cur_ciou
+        #                 ),
+        #             ),
+        #         )
+        #         if os.path.exists(save_dir):
+        #             shutil.rmtree(save_dir)
+        #     torch.distributed.barrier()
+        #     model_engine.save_checkpoint(save_dir)
 
 
 def train(
