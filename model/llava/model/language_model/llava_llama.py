@@ -78,16 +78,19 @@ class LlavaLlamaForCausalLM(LlamaForCausalLM, LlavaMetaForCausalLM):
         return_dict = (
             return_dict if return_dict is not None else self.config.use_return_dict
         )
-
+        
+        # print(f"pre:{input_ids.shape}") # [6, 65]
         (
             input_ids,
             attention_mask,
             past_key_values,
             inputs_embeds,
             labels,
+            image_features
         ) = self.prepare_inputs_labels_for_multimodal(
             input_ids, attention_mask, past_key_values, labels, images
         )
+        # print(f"after:{inputs_embeds.shape}") # [6, 320, 4096]
         # decoder outputs consists of (dec_features, layer_state, dec_hidden, dec_attn)
 
         outputs = self.model(
@@ -100,6 +103,7 @@ class LlavaLlamaForCausalLM(LlamaForCausalLM, LlavaMetaForCausalLM):
             output_hidden_states=output_hidden_states,
             return_dict=return_dict,
         )
+        # print(outputs)
 
         hidden_states = outputs[0]
         logits = self.lm_head(hidden_states)
@@ -132,7 +136,7 @@ class LlavaLlamaForCausalLM(LlamaForCausalLM, LlavaMetaForCausalLM):
             past_key_values=outputs.past_key_values,
             hidden_states=output_hidden_states,  # outputs.hidden_states,
             attentions=outputs.attentions,
-        )
+        ), image_features
 
     def prepare_inputs_for_generation(
         self,

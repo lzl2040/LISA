@@ -58,11 +58,13 @@ def collate_fn(
         images_clip_list.append(images_clip)
         conversation_list.extend(conversations)
         label_list.append(label)
+        # print(masks.shape)
         masks_list.append(masks.float())
         resize_list.append(resize)
         questions_list.append(questions)
         sampled_classes_list.append(sampled_classes)
-        cnt += len(conversations)
+        cnt += len(conversations) # 长度对应num_classes_per_sample
+        # print(images.shape, len(conversations))
         offset_list.append(cnt)
         inferences.append(inference)
 
@@ -76,16 +78,20 @@ def collate_fn(
             conversation_list[i] = conversation_list[i].replace(
                 DEFAULT_IMAGE_TOKEN, replace_token
             )
+            # print(conversation_list[i])
     input_ids = [
         tokenizer_image_token(prompt, tokenizer, return_tensors="pt")
         for prompt in conversation_list
     ]
+    # print(f"pre pad:{len(input_ids[0])}")
     input_ids = torch.nn.utils.rnn.pad_sequence(
         input_ids, batch_first=True, padding_value=tokenizer.pad_token_id
     )
+    # print(f"after pad:{len(input_ids[0])}")
     attention_masks = input_ids.ne(tokenizer.pad_token_id)
 
     conv = conversation_lib.default_conversation.copy()
+    # print(conv.sep, conv.sep2) # " ", "</s>""
     targets = input_ids.clone()
 
     if conv_type == "llava_v1":
@@ -95,14 +101,16 @@ def collate_fn(
     for conversation, target in zip(conversation_list, targets):
         total_len = int(target.ne(tokenizer.pad_token_id).sum())
 
-        rounds = conversation.split(conv.sep2)
+        rounds = conversation.split(conv.sep2) # 一轮
+        
         cur_len = 1
         target[:cur_len] = IGNORE_INDEX
         for i, rou in enumerate(rounds):
             if rou == "":
                 break
 
-            parts = rou.split(sep)
+            parts = rou.split(sep) # 分成提问的和回答的两部分内容
+            # print(parts)
             # if len(parts) != 2:
             #     break
             assert len(parts) == 2, (len(parts), rou)
@@ -115,10 +123,10 @@ def collate_fn(
                 round_len = len(tokenizer(rou).input_ids)
                 instruction_len = len(tokenizer(parts[0]).input_ids) - 2
 
-            target[cur_len : cur_len + instruction_len] = IGNORE_INDEX
+            target[cur_len : cur_len + instruction_len] = IGNORE_INDEX # 只关注回答部分的内容
 
             cur_len += round_len
-        target[cur_len:] = IGNORE_INDEX
+        target[cur_len:] = IGNORE_INDEX # 回答内容之后的内容也不关注
 
         if False:
             z = target.clone()
@@ -141,7 +149,9 @@ def collate_fn(
             input_ids = input_ids[:, :truncate_len]
             targets = targets[:, :truncate_len]
             attention_masks = attention_masks[:, :truncate_len]
-
+    
+    # 这里一张图片对应多个描述，因此长度不一样
+    # print(len(images_list), len(conversation_list)) 2 6
     return {
         "image_paths": image_path_list,
         "images": torch.stack(images_list, dim=0),

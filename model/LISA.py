@@ -11,7 +11,7 @@ from utils.utils import (DEFAULT_IM_END_TOKEN, DEFAULT_IM_START_TOKEN,
 from .llava.model.language_model.llava_llama import (LlavaLlamaForCausalLM,
                                                      LlavaLlamaModel)
 from .segment_anything import build_sam_vit_h
-
+from .diffusion.diff_seg import DiffSegModel
 
 def dice_loss(
     inputs: torch.Tensor,
@@ -86,10 +86,14 @@ class LisaMetaModel:
         #     for param in self.visual_model.mask_decoder.parameters():
         #         param.requires_grad = True
         # Diffusion
-        
+        self.seg_model = DiffSegModel(model_type="DiT-S", in_channels=3, 
+                                      img_feats_channels=config.hidden_size, 
+                                      img_size=480, condition_in_channels=config.out_dim)
+        for param in self.seg_model.parameters():
+            param.requires_grad = True
 
         # Projection layer
-        in_dim = config.hidden_size
+        in_dim = config.hidden_size # 4096
         out_dim = config.out_dim
         text_fc = [
             nn.Linear(in_dim, in_dim),
@@ -182,11 +186,11 @@ class LISAForCausalLM(LlavaLlamaForCausalLM):
         inference: bool = False,
         **kwargs,
     ):
-        image_embeddings = self.get_visual_embs(images)
-        batch_size = image_embeddings.shape[0]
-        assert batch_size == len(offset) - 1
+        # image_embeddings = self.get_visual_embs(images)
+        # batch_size = image_embeddings.shape[0]
+        # assert batch_size == len(offset) - 1
 
-        seg_token_mask = input_ids[:, 1:] == self.seg_token_idx
+        seg_token_mask = input_ids[:, 1:] == self.seg_token_idx # B L-1
         seg_token_mask = torch.cat(
             [
                 seg_token_mask,
@@ -199,6 +203,7 @@ class LISAForCausalLM(LlavaLlamaForCausalLM):
             [torch.zeros((seg_token_mask.shape[0], 255)).bool().cuda(), seg_token_mask],
             dim=1,
         )
+        # print(f"seg token mask:{seg_token_mask.shape}") # [6, 335]
 
         if inference:
             n_batch = 1
@@ -237,7 +242,7 @@ class LISAForCausalLM(LlavaLlamaForCausalLM):
                 images_clip_list.append(images_clip_i)
             images_clip = torch.cat(images_clip_list, dim=0)
 
-            output = super().forward(
+            output, image_features = super().forward(
                 images=images_clip,
                 attention_mask=attention_masks,
                 input_ids=input_ids,
@@ -246,20 +251,39 @@ class LISAForCausalLM(LlavaLlamaForCausalLM):
             )
             output_hidden_states = output.hidden_states
 
+        # from cogact: https://github.com/microsoft/CogACT/blob/main/vla/cogactvla.py#L129
+        # last_hidden = output_hidden_states[-1]
+        # # print(self.get_vision_tower().vision_tower.vision_model.embeddings.num_patches) # 256
+        # num_patches = self.get_vision_tower().vision_tower.vision_model.embeddings.num_patches
+        # last_hidden = last_hidden[:, num_patches:] # extract language tokens
+        # # print(last_hidden.shape) # torch.Size([6, 68, 256])
+        # # extract cognition features
+        # cumulative_sum = attention_masks.cumsum(dim=1)
+        # # print(attention_masks, cumulative_sum) # attention_masks:B L, 哪些位置是可以用的True，不是pad
+        # last_true_indices = (cumulative_sum == cumulative_sum.max(dim=1, keepdim=True)[0]).float().argmax(dim=1) # B, 最后一个不是pad的位置
+        # expanded_indices = last_true_indices.unsqueeze(-1).expand(-1, last_hidden.size(-1))   
+        # # cognition_features = last_hidden.gather(1, expanded_indices.unsqueeze(1))  # [B, 1, D]
+        # print(last_true_indices, last_hidden.shape)
+        
         hidden_states = []
+        # print(len(output_hidden_states), output_hidden_states[-1].shape) # 33 torch.Size([5, 328, 4096])
 
         assert len(self.model.text_hidden_fcs) == 1
         hidden_states.append(self.model.text_hidden_fcs[0](output_hidden_states[-1]))
-
+        # print(hidden_states[-1].shape) # [5, 335, 256]
         last_hidden_state = torch.stack(hidden_states, dim=-1).sum(dim=-1)
+        # print(last_hidden_state.shape) # [5, 335, 256]
         pred_embeddings = last_hidden_state[seg_token_mask]
+        # print(pred_embeddings.shape) # [5, 256], 因为SEG只有一个
         seg_token_counts = seg_token_mask.int().sum(-1)  # [bs, ]
+        # print(seg_token_counts) # [1, 1, 1, 1, 1]
 
         seg_token_offset = seg_token_counts.cumsum(-1)
+        # offset从0开始
         seg_token_offset = torch.cat(
             [torch.zeros(1).long().cuda(), seg_token_offset], dim=0
         )
-
+        # print(offset) # [0, 2, 5]
         seg_token_offset = seg_token_offset[offset]
 
         pred_embeddings_ = []
@@ -267,81 +291,105 @@ class LISAForCausalLM(LlavaLlamaForCausalLM):
             start_i, end_i = seg_token_offset[i], seg_token_offset[i + 1]
             pred_embeddings_.append(pred_embeddings[start_i:end_i])
         pred_embeddings = pred_embeddings_
-
-        multimask_output = False
-        pred_masks = []
+        # print(image_features.shape) # 5 256 4096
+        # print(len(pred_embeddings)) # 2
+        count = 0
+        diffusion_loss = 0
         for i in range(len(pred_embeddings)):
-            (
-                sparse_embeddings,
-                dense_embeddings,
-            ) = self.model.visual_model.prompt_encoder(
-                points=None,
-                boxes=None,
-                masks=None,
-                text_embeds=pred_embeddings[i].unsqueeze(1),
-            )
-            sparse_embeddings = sparse_embeddings.to(pred_embeddings[i].dtype)
-            low_res_masks, iou_predictions = self.model.visual_model.mask_decoder(
-                image_embeddings=image_embeddings[i].unsqueeze(0),
-                image_pe=self.model.visual_model.prompt_encoder.get_dense_pe(),
-                sparse_prompt_embeddings=sparse_embeddings,
-                dense_prompt_embeddings=dense_embeddings,
-                multimask_output=multimask_output,
-            )
-            pred_mask = self.model.visual_model.postprocess_masks(
-                low_res_masks,
-                input_size=resize_list[i],
-                original_size=label_list[i].shape,
-            )
-            pred_masks.append(pred_mask[:, 0])
+            pred_embedding = pred_embeddings[i] # N C
+            masks = masks_list[i]
+            for j in range(pred_embedding.shape[0]):
+                condition_embedding = pred_embedding[j:j+1].unsqueeze(0) # 1 1 C=256
+                gt_mask = masks[j:j+1].unsqueeze(0) # 1 1 H W
+                gt_mask = gt_mask.repeat(1, 3, 1, 1) # 1 3 H W
+                gt_mask = gt_mask.to(condition_embedding.dtype)
+                loss = self.model.seg_model.loss(gt_mask, condition_embedding, image_features[count:count+1])
+                print(loss)
+                diffusion_loss += loss
+                count += 1
 
-        model_output = output
-        gt_masks = masks_list
+        # for seg model is SAM
+        # print(masks_list[0].shape, len(masks_list)) # torch.Size([3, 360, 640]) 2
+        # multimask_output = False
+        # pred_masks = []
+        # for i in range(len(pred_embeddings)):
+        #     (
+        #         sparse_embeddings,
+        #         dense_embeddings,
+        #     ) = self.model.visual_model.prompt_encoder(
+        #         points=None,
+        #         boxes=None,
+        #         masks=None,
+        #         text_embeds=pred_embeddings[i].unsqueeze(1), 
+        #     )
+        #     sparse_embeddings = sparse_embeddings.to(pred_embeddings[i].dtype)
+        #     low_res_masks, iou_predictions = self.model.visual_model.mask_decoder(
+        #         image_embeddings=image_embeddings[i].unsqueeze(0),
+        #         image_pe=self.model.visual_model.prompt_encoder.get_dense_pe(),
+        #         sparse_prompt_embeddings=sparse_embeddings,
+        #         dense_prompt_embeddings=dense_embeddings,
+        #         multimask_output=multimask_output,
+        #     )
+        #     print(low_res_masks.shape) # N 1 256 256, N表示每张图片采样的描述数目
+        #     pred_mask = self.model.visual_model.postprocess_masks(
+        #         low_res_masks,
+        #         input_size=resize_list[i],
+        #         original_size=label_list[i].shape,
+        #     )
+        #     # print(pred_mask.shape) # N 1 H W
+        #     pred_masks.append(pred_mask[:, 0])
 
-        if inference:
-            return {
-                "pred_masks": pred_masks,
-                "gt_masks": gt_masks,
-            }
+        # model_output = output
+        # gt_masks = masks_list
 
-        output = model_output.logits
+        # if inference:
+        #     return {
+        #         "pred_masks": pred_masks,
+        #         "gt_masks": gt_masks,
+        #     }
 
-        ce_loss = model_output.loss
-        ce_loss = ce_loss * self.ce_loss_weight
-        mask_bce_loss = 0
-        mask_dice_loss = 0
-        num_masks = 0
-        for batch_idx in range(len(pred_masks)):
-            gt_mask = gt_masks[batch_idx]
-            pred_mask = pred_masks[batch_idx]
+        # output = model_output.logits
 
-            assert (
-                gt_mask.shape[0] == pred_mask.shape[0]
-            ), "gt_mask.shape: {}, pred_mask.shape: {}".format(
-                gt_mask.shape, pred_mask.shape
-            )
-            mask_bce_loss += (
-                sigmoid_ce_loss(pred_mask, gt_mask, num_masks=gt_mask.shape[0])
-                * gt_mask.shape[0]
-            )
-            mask_dice_loss += (
-                dice_loss(pred_mask, gt_mask, num_masks=gt_mask.shape[0])
-                * gt_mask.shape[0]
-            )
-            num_masks += gt_mask.shape[0]
+        # ce_loss = model_output.loss
+        # ce_loss = ce_loss * self.ce_loss_weight
+        # mask_bce_loss = 0
+        # mask_dice_loss = 0
+        # num_masks = 0
+        # for batch_idx in range(len(pred_masks)):
+        #     gt_mask = gt_masks[batch_idx]
+        #     pred_mask = pred_masks[batch_idx]
+        #     # print(gt_mask.shape, pred_mask.shape) # torch.Size([3, 478, 640]) torch.Size([3, 478, 640])
 
-        mask_bce_loss = self.bce_loss_weight * mask_bce_loss / (num_masks + 1e-8)
-        mask_dice_loss = self.dice_loss_weight * mask_dice_loss / (num_masks + 1e-8)
-        mask_loss = mask_bce_loss + mask_dice_loss
+        #     assert (
+        #         gt_mask.shape[0] == pred_mask.shape[0]
+        #     ), "gt_mask.shape: {}, pred_mask.shape: {}".format(
+        #         gt_mask.shape, pred_mask.shape
+        #     )
+        #     mask_bce_loss += (
+        #         sigmoid_ce_loss(pred_mask, gt_mask, num_masks=gt_mask.shape[0])
+        #         * gt_mask.shape[0]
+        #     )
+        #     mask_dice_loss += (
+        #         dice_loss(pred_mask, gt_mask, num_masks=gt_mask.shape[0])
+        #         * gt_mask.shape[0]
+        #     )
+        #     num_masks += gt_mask.shape[0]
 
-        loss = ce_loss + mask_loss
+        # mask_bce_loss = self.bce_loss_weight * mask_bce_loss / (num_masks + 1e-8)
+        # mask_dice_loss = self.dice_loss_weight * mask_dice_loss / (num_masks + 1e-8)
+        # mask_loss = mask_bce_loss + mask_dice_loss
 
+        # loss = ce_loss + mask_loss
+
+        # return {
+        #     "loss": loss,
+        #     "ce_loss": ce_loss,
+        #     "mask_bce_loss": mask_bce_loss,
+        #     "mask_dice_loss": mask_dice_loss,
+        #     "mask_loss": mask_loss,
+        # }
         return {
-            "loss": loss,
-            "ce_loss": ce_loss,
-            "mask_bce_loss": mask_bce_loss,
-            "mask_dice_loss": mask_dice_loss,
-            "mask_loss": mask_loss,
+            "loss": diffusion_loss
         }
 
     def evaluate(

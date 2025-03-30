@@ -33,10 +33,10 @@ def tokenizer_image_token(
     ):
         offset = 1
         input_ids.append(prompt_chunks[0][0])
-
+    # print(tokenizer.bos_token_id)
     for x in insert_separator(prompt_chunks, [image_token_index] * (offset + 1)):
+        
         input_ids.extend(x[offset:])
-
     if return_tensors is not None:
         if return_tensors == "pt":
             return torch.tensor(input_ids, dtype=torch.long)

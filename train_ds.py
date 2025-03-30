@@ -126,6 +126,7 @@ def main(args):
     tokenizer.pad_token = tokenizer.unk_token
     num_added_tokens = tokenizer.add_tokens("[SEG]")
     args.seg_token_idx = tokenizer("[SEG]", add_special_tokens=False).input_ids[0]
+    print(f"seg token idx:{args.seg_token_idx}") # 32004
 
     if args.use_mm_start_end:
         tokenizer.add_tokens(
@@ -142,6 +143,7 @@ def main(args):
         "vision_pretrained": args.vision_pretrained,
         "vision_tower": args.vision_tower,
         "use_mm_start_end": args.use_mm_start_end,
+        "image_size" : args.image_size
     }
     torch_dtype = torch.float32
     if args.precision == "bf16":
@@ -365,17 +367,17 @@ def main(args):
         exit()
 
     for epoch in range(args.start_epoch, args.epochs):
-        print("epoch")
+        # print("epoch")
         # train for one epoch
-        # train_iter = train(
-        #     train_loader,
-        #     model_engine,
-        #     epoch,
-        #     scheduler,
-        #     writer,
-        #     train_iter,
-        #     args,
-        # )
+        train_iter = train(
+            train_loader,
+            model_engine,
+            epoch,
+            scheduler,
+            writer,
+            train_iter,
+            args,
+        )
 
         # if args.no_eval == False:
         #     giou, ciou = validate(val_loader, model_engine, epoch, writer, args)
@@ -459,16 +461,16 @@ def train(
             output_dict = model(**input_dict)
 
             loss = output_dict["loss"]
-            ce_loss = output_dict["ce_loss"]
-            mask_bce_loss = output_dict["mask_bce_loss"]
-            mask_dice_loss = output_dict["mask_dice_loss"]
-            mask_loss = output_dict["mask_loss"]
+            # ce_loss = output_dict["ce_loss"]
+            # mask_bce_loss = output_dict["mask_bce_loss"]
+            # mask_dice_loss = output_dict["mask_dice_loss"]
+            # mask_loss = output_dict["mask_loss"]
 
             losses.update(loss.item(), input_dict["images"].size(0))
-            ce_losses.update(ce_loss.item(), input_dict["images"].size(0))
-            mask_bce_losses.update(mask_bce_loss.item(), input_dict["images"].size(0))
-            mask_dice_losses.update(mask_dice_loss.item(), input_dict["images"].size(0))
-            mask_losses.update(mask_loss.item(), input_dict["images"].size(0))
+            # ce_losses.update(ce_loss.item(), input_dict["images"].size(0))
+            # mask_bce_losses.update(mask_bce_loss.item(), input_dict["images"].size(0))
+            # mask_dice_losses.update(mask_dice_loss.item(), input_dict["images"].size(0))
+            # mask_losses.update(mask_loss.item(), input_dict["images"].size(0))
             model.backward(loss)
             model.step()
 
@@ -482,22 +484,22 @@ def train(
                 data_time.all_reduce()
 
                 losses.all_reduce()
-                ce_losses.all_reduce()
-                mask_bce_losses.all_reduce()
-                mask_dice_losses.all_reduce()
-                mask_losses.all_reduce()
+                # ce_losses.all_reduce()
+                # mask_bce_losses.all_reduce()
+                # mask_dice_losses.all_reduce()
+                # mask_losses.all_reduce()
 
             if args.local_rank == 0:
                 progress.display(global_step + 1)
                 writer.add_scalar("train/loss", losses.avg, global_step)
-                writer.add_scalar("train/ce_loss", ce_losses.avg, global_step)
-                writer.add_scalar(
-                    "train/mask_bce_loss", mask_bce_losses.avg, global_step
-                )
-                writer.add_scalar(
-                    "train/mask_dice_loss", mask_dice_losses.avg, global_step
-                )
-                writer.add_scalar("train/mask_loss", mask_losses.avg, global_step)
+                # writer.add_scalar("train/ce_loss", ce_losses.avg, global_step)
+                # writer.add_scalar(
+                #     "train/mask_bce_loss", mask_bce_losses.avg, global_step
+                # )
+                # writer.add_scalar(
+                #     "train/mask_dice_loss", mask_dice_losses.avg, global_step
+                # )
+                # writer.add_scalar("train/mask_loss", mask_losses.avg, global_step)
                 writer.add_scalar(
                     "metrics/total_secs_per_batch", batch_time.avg, global_step
                 )
@@ -508,10 +510,10 @@ def train(
             batch_time.reset()
             data_time.reset()
             losses.reset()
-            ce_losses.reset()
-            mask_bce_losses.reset()
-            mask_dice_losses.reset()
-            mask_losses.reset()
+            # ce_losses.reset()
+            # mask_bce_losses.reset()
+            # mask_dice_losses.reset()
+            # mask_losses.reset()
 
         if global_step != 0:
             curr_lr = scheduler.get_last_lr()

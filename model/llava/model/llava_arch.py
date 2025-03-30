@@ -121,6 +121,7 @@ class LlavaMetaForCausalLM(ABC):
             image_features = [x.flatten(0, 1) for x in image_features]
         else:
             image_features = self.encode_images(images)
+            # print(f"image feats:{image_features.shape}") # [5, 256, 4096]
 
         new_input_embeds = []
         new_labels = [] if labels is not None else None
@@ -183,9 +184,12 @@ class LlavaMetaForCausalLM(ABC):
                         )
                         cur_labels = cur_labels[image_token_start + 2 :]
                 elif getattr(self.config, "mm_use_im_start_end", False):
+                    # image: [256, 4096] input_id: [66]
+                    # print(f"mm_use_im_start_end, image feats:{cur_image_features.shape} input_id:{cur_input_ids.shape}")
                     cur_new_input_embeds.append(
                         self.get_model().embed_tokens(cur_input_ids[:image_token_start])
                     )
+                    # print(cur_new_input_embeds[-1].shape) # torch.Size([35, 4096])
                     cur_new_input_embeds.append(cur_image_features)
                     cur_new_input_embeds.append(
                         self.get_model().embed_tokens(
@@ -201,12 +205,13 @@ class LlavaMetaForCausalLM(ABC):
                                 device=labels.device,
                                 dtype=labels.dtype,
                             )
-                        )
+                        ) # image token部分都是IGNORE_INDEX
                         cur_new_labels.append(
                             cur_labels[image_token_start + 1 : image_token_start + 2]
-                        )
-                        cur_labels = cur_labels[image_token_start + 2 :]
+                        ) # 这里是<image>后面的一个
+                        cur_labels = cur_labels[image_token_start + 2 :] # 这里是针对多图输入应该
                 else:
+                    print(f"none")
                     cur_new_input_embeds.append(
                         self.get_model().embed_tokens(cur_input_ids[:image_token_start])
                     )
@@ -228,6 +233,7 @@ class LlavaMetaForCausalLM(ABC):
                 ):
                     cur_input_ids = cur_input_ids[image_token_start + 2 :]
                 elif getattr(self.config, "mm_use_im_start_end", False):
+                    # 往后找含image的
                     cur_input_ids = cur_input_ids[image_token_start + 2 :]
                 else:
                     cur_input_ids = cur_input_ids[image_token_start + 1 :]
@@ -252,12 +258,15 @@ class LlavaMetaForCausalLM(ABC):
             cur_new_input_embeds = [
                 x.to(device=self.device) for x in cur_new_input_embeds
             ]
+            # [327, 4096]
             cur_new_input_embeds = torch.cat(cur_new_input_embeds, dim=0)
+            # print(f"cur_new_input_embeds:{cur_new_input_embeds.shape}")
             new_input_embeds.append(cur_new_input_embeds)
             if labels is not None:
                 cur_new_labels = torch.cat(cur_new_labels, dim=0)
                 new_labels.append(cur_new_labels)
 
+        # 进行pad处理，让new_input_embeds元素的维度都一样
         if any(x.shape != new_input_embeds[0].shape for x in new_input_embeds):
             max_len = max(x.shape[0] for x in new_input_embeds)
 
@@ -344,7 +353,7 @@ class LlavaMetaForCausalLM(ABC):
                 )
                 assert attention_mask.shape == new_input_embeds.shape[:2]
 
-        return None, attention_mask, past_key_values, new_input_embeds, new_labels
+        return None, attention_mask, past_key_values, new_input_embeds, new_labels, image_features
 
     # def initialize_vision_tokenizer(self, model_args, tokenizer):
     def initialize_vision_tokenizer(self, model_args, num_new_tokens):

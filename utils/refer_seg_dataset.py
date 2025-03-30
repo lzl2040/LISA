@@ -19,7 +19,8 @@ from .utils import ANSWER_LIST, SHORT_QUESTION_LIST
 class ReferSegDataset(torch.utils.data.Dataset):
     pixel_mean = torch.Tensor([123.675, 116.28, 103.53]).view(-1, 1, 1)
     pixel_std = torch.Tensor([58.395, 57.12, 57.375]).view(-1, 1, 1)
-    img_size = 1024
+    # img_size = 1024
+    # img_size = 480
     ignore_label = 255
 
     def __init__(
@@ -40,6 +41,7 @@ class ReferSegDataset(torch.utils.data.Dataset):
 
         self.base_image_dir = base_image_dir
         self.image_size = image_size
+        self.img_size = image_size
         self.tokenizer = tokenizer
         self.precision = precision
         self.transform = ResizeLongestSide(image_size)
@@ -117,6 +119,13 @@ class ReferSegDataset(torch.utils.data.Dataset):
         x = F.pad(x, (0, padw, 0, padh))
         return x
 
+    def pad_mask(self, x: torch.Tensor):
+        h, w = x.shape[-2:]
+        padh = self.img_size - h
+        padw = self.img_size - w
+        x = F.pad(x, (0, padw, 0, padh))
+        return x
+
     def __getitem__(self, idx):
         ds = random.randint(0, len(self.refer_seg_ds_list) - 1)
         ds = self.refer_seg_ds_list[ds]
@@ -156,6 +165,7 @@ class ReferSegDataset(torch.utils.data.Dataset):
         image_clip = self.clip_image_processor.preprocess(image, return_tensors="pt")[
             "pixel_values"
         ][0]
+        # print(image_clip.shape) # 3 224 224
 
         image = self.transform.apply_image(image)  # preprocess image for sam
         resize = image.shape[:2]
@@ -180,6 +190,7 @@ class ReferSegDataset(torch.utils.data.Dataset):
             conversations.append(conv.get_prompt())
             i += 1
 
+        # print(conversations)
         image = self.preprocess(torch.from_numpy(image).permute(2, 0, 1).contiguous())
 
         flag = False
@@ -262,6 +273,9 @@ class ReferSegDataset(torch.utils.data.Dataset):
         #         cv2.imwrite(os.path.join(save_dir, "{}_{}_{}.jpg".format(image_name, i, sampled_classes[i])), masks[i].astype(np.int32) * 100)
 
         masks = torch.from_numpy(masks)
+        # my
+        masks = self.pad_mask(masks)
+        # print(masks.shape, sampled_ann_ids, sampled_classes)
         label = torch.ones(masks.shape[1], masks.shape[2]) * self.ignore_label
 
         return (
